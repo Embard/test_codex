@@ -71,6 +71,7 @@ WINDOW_HEIGHT_PARAM_NAMES = [
 
 # Смещение для поиска соседнего помещения за стеной.
 PROBE_DISTANCES_M = [0.15, 0.30, 0.60, 1.00, 1.50, 2.20]
+ADJACENT_PROBE_Z_OFFSETS_M = [0.0, -0.35, 0.35, -0.75, 0.75]
 # При поиске соседнего помещения нельзя проверять только середину стены:
 # на сложной АР-геометрии короткие участки у дверей/шахт иначе ошибочно становятся НС.
 ADJACENT_SAMPLE_PARAMS = [0.18, 0.35, 0.50, 0.65, 0.82]
@@ -879,7 +880,37 @@ def wall_function_text(wall):
 
 
 def wall_name_text(wall):
-    return low(wall_type_name(wall) + u' ' + elem_name(wall) + u' ' + wall_function_text(wall))
+    parts = [wall_type_name(wall), elem_name(wall), wall_function_text(wall)]
+    typ = wall_type_element(wall)
+    candidates = [wall, typ]
+    param_names = [
+        # Только семантические параметры; без общих "Тип/Описание",
+        # чтобы не ловить ложные срабатывания внутренних стен.
+        u'Функция', u'FUNCTION_PARAM', u'Назначение',
+        u'ADSK_Назначение', u'ADSK_Функция'
+    ]
+    for obj in candidates:
+        if obj is None:
+            continue
+        for pn in param_names:
+            try:
+                p = obj.LookupParameter(pn)
+                if p and p.HasValue:
+                    try:
+                        v = p.AsString()
+                        if v:
+                            parts.append(ustr(v))
+                    except:
+                        pass
+                    try:
+                        v = p.AsValueString()
+                        if v:
+                            parts.append(ustr(v))
+                    except:
+                        pass
+            except:
+                pass
+    return low(u' '.join(parts))
 
 
 def text_has_token(text, tokens):
@@ -911,7 +942,9 @@ def wall_looks_internal(wall):
     t = wall_name_text(wall)
     if wall_looks_exterior(wall):
         return False
-    if text_has_token(t, WALL_INTERIOR_TOKENS):
+    strong_tokens = [u'внутр', u'перегород', u'межкварт', u'межкомнат', u'внс']
+    weak_tokens = [u'коридор', u'моп', u'гкл', u'газобет']
+    if text_has_token(t, strong_tokens):
         return True
     try:
         typ = wall_type_element(wall)
@@ -919,6 +952,15 @@ def wall_looks_internal(wall):
             return True
     except:
         pass
+    # Слабые маркеры учитываем только если есть дополнительный признак внутренней стены.
+    if text_has_token(t, weak_tokens):
+        try:
+            typ = wall_type_element(wall)
+            p = typ.get_Parameter(BuiltInParameter.FUNCTION_PARAM) if typ else None
+            if p and p.HasValue and low(ustr(p.AsValueString())).find(u'внутр') >= 0:
+                return True
+        except:
+            pass
     return False
 
 
@@ -938,15 +980,24 @@ def curve_point_at(curve, param):
 def find_adjacent_room_along_segment(room, curve, normal, rooms_on_level):
     if curve is None or normal is None:
         return None
+    base_z = None
+    rp = room_point(room)
+    if rp is not None:
+        base_z = rp.Z
     for param in ADJACENT_SAMPLE_PARAMS:
         base = curve_point_at(curve, param)
         if base is None:
             continue
+        probe_bases = [base]
+        if base_z is not None:
+            for zoff_m in ADJACENT_PROBE_Z_OFFSETS_M:
+                probe_bases.append(XYZ(base.X, base.Y, base_z + zoff_m * M_TO_FT))
         for dm in PROBE_DISTANCES_M:
-            p = add_xyz(base, normal, dm * M_TO_FT)
-            adjacent = get_room_by_point(rooms_on_level, p, room)
-            if adjacent is not None:
-                return adjacent
+            for pb in probe_bases:
+                p = add_xyz(pb, normal, dm * M_TO_FT)
+                adjacent = get_room_by_point(rooms_on_level, p, room)
+                if adjacent is not None:
+                    return adjacent
     return None
 
 
